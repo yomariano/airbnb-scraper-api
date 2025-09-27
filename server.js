@@ -12,6 +12,10 @@ app.use(express.json());
 
 // Routes
 app.post('/api/scrape', async (req, res) => {
+  console.log('\n🔍 [API HIT] POST /api/scrape');
+  console.log('📋 Request Body:', JSON.stringify(req.body, null, 2));
+  console.log('🕐 Timestamp:', new Date().toISOString());
+
   try {
     const { url, useProxy } = req.body;
 
@@ -34,7 +38,17 @@ app.post('/api/scrape', async (req, res) => {
     const proxyOverride = typeof useProxy === 'boolean' ? useProxy : undefined;
 
     // Scrape the listing
+    console.log('🌐 Starting scrape for URL:', url);
+    console.log('🔧 Using proxy:', proxyOverride !== undefined ? proxyOverride : 'default setting');
+
     const result = await scraper.scrapeAirbnbListing(url, proxyOverride);
+
+    console.log('✅ Scrape completed successfully');
+    console.log('📊 Result preview:', {
+      title: result.data?.title?.substring(0, 50) + '...',
+      price: result.data?.price,
+      imagesCount: result.data?.images?.length || 0
+    });
 
     res.json({
       success: true,
@@ -42,7 +56,8 @@ app.post('/api/scrape', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('API Error:', error);
+    console.error('❌ [ERROR] Scrape failed:', error.message);
+    console.error('Stack trace:', error.stack);
     res.status(500).json({
       success: false,
       error: 'Failed to scrape the listing',
@@ -52,6 +67,9 @@ app.post('/api/scrape', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
+  console.log('\n💚 [API HIT] GET /api/health');
+  console.log('🕐 Timestamp:', new Date().toISOString());
+
   const config = scraper.getProxyConfig();
   res.json({
     status: 'OK',
@@ -62,6 +80,9 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/', (req, res) => {
+  console.log('\n🏠 [API HIT] GET /');
+  console.log('🕐 Timestamp:', new Date().toISOString());
+
   res.json({
     message: 'Airbnb Scraper API',
     endpoints: {

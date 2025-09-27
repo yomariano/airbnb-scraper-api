@@ -93,80 +93,6 @@ const connectBrowser = async () => {
   return { browser, useBrightDataBrowser, useProxy, proxyUsername, proxyPassword };
 };
 
-/**
- * Extract images from the page
- */
-const extractImages = async (page) => {
-  return await page.evaluate(() => {
-    const allImages = [];
-    const seenUrls = new Set();
-
-    // Extract from img tags
-    document.querySelectorAll('img').forEach(img => {
-      if (img.src && img.src.includes('muscache.com')) {
-        const cleanUrl = img.src.split('?')[0];
-
-        if (!seenUrls.has(cleanUrl) &&
-            !cleanUrl.includes('profile') &&
-            !cleanUrl.includes('user')) {
-
-          seenUrls.add(cleanUrl);
-          allImages.push({
-            url: cleanUrl + '?im_w=1200',
-            alt: img.alt || '',
-            width: img.naturalWidth || img.width || null,
-            height: img.naturalHeight || img.height || null
-          });
-        }
-      }
-    });
-
-    // Extract from picture elements
-    document.querySelectorAll('picture img').forEach(img => {
-      const src = img.currentSrc || img.src;
-      if (src && src.includes('muscache.com')) {
-        const cleanUrl = src.split('?')[0];
-
-        if (!seenUrls.has(cleanUrl) &&
-            !cleanUrl.includes('profile') &&
-            !cleanUrl.includes('user')) {
-
-          seenUrls.add(cleanUrl);
-          allImages.push({
-            url: cleanUrl + '?im_w=1200',
-            alt: img.alt || '',
-            width: img.naturalWidth || img.width || null,
-            height: img.naturalHeight || img.height || null
-          });
-        }
-      }
-    });
-
-    // Extract from background images
-    document.querySelectorAll('[style*="background-image"]').forEach(elem => {
-      const style = elem.getAttribute('style');
-      const matches = style.match(/url\(["']?(https:\/\/[^"')]+muscache\.com[^"')]+)/);
-      if (matches && matches[1]) {
-        const cleanUrl = matches[1].split('?')[0];
-
-        if (!seenUrls.has(cleanUrl) &&
-            !cleanUrl.includes('profile') &&
-            !cleanUrl.includes('user')) {
-
-          seenUrls.add(cleanUrl);
-          allImages.push({
-            url: cleanUrl + '?im_w=1200',
-            alt: '',
-            width: null,
-            height: null
-          });
-        }
-      }
-    });
-
-    return allImages;
-  });
-};
 
 /**
  * Extract title from the page
@@ -219,17 +145,241 @@ const scrapeAirbnbListing = async (url, useProxyOverride) => {
 
     // Wait for images to load
     await page.waitForSelector('img', { timeout: 15000 });
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // Scroll to load more images
-    await page.evaluate(() => {
-      window.scrollBy(0, 500);
+    // Try to click "Show all photos" button if it exists
+    try {
+      // First, try to find and click the main photo grid or "Show all photos" button
+      const photoButtonClicked = await page.evaluate(() => {
+        // Strategy 1: Find button with photo count (e.g., "23 photos")
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+        const photoButton = buttons.find(btn => {
+          const text = btn.textContent || '';
+          // Match patterns like "23 photos", "Show all 23 photos", "23+ photos"
+          return text.match(/\d+\+?\s*(photo|picture|foto)/i) ||
+                 text.toLowerCase().includes('show all') ||
+                 text.toLowerCase().includes('ver todas');
+        });
+
+        if (photoButton) {
+          photoButton.click();
+          return 'photo-count-button';
+        }
+
+        // Strategy 2: Click on the main image grid container if it's clickable
+        const imageGrid = document.querySelector('[data-testid="photo-viewer-slideshow-desktop"] button') ||
+                         document.querySelector('div[role="button"] img')?.closest('div[role="button"]');
+        if (imageGrid) {
+          imageGrid.click();
+          return 'image-grid';
+        }
+
+        // Strategy 3: Look for the first large image that might open the gallery
+        const firstImage = document.querySelector('img[src*="muscache.com"]:not([src*="profile"])')?.closest('button, div[role="button"]');
+        if (firstImage) {
+          firstImage.click();
+          return 'first-image';
+        }
+
+        return null;
+      });
+
+      if (photoButtonClicked) {
+        console.log(`Clicked photo gallery using strategy: ${photoButtonClicked}`);
+        // Wait longer for modal to fully load
+        await new Promise(resolve => setTimeout(resolve, 4000));
+      }
+
+    } catch (error) {
+      console.log('Could not click photo gallery button:', error.message);
+    }
+
+    // Scroll to load lazy-loaded images in the gallery
+    await page.evaluate(async () => {
+      const scrollContainer = document.querySelector('[role="dialog"]') ||
+                            document.querySelector('.modal-content') ||
+                            document.body;
+
+      const scrollStep = 300;
+      const scrollDelay = 500;
+      let previousHeight = 0;
+      let currentHeight = scrollContainer.scrollHeight;
+
+      while (previousHeight !== currentHeight) {
+        previousHeight = currentHeight;
+        scrollContainer.scrollTop += scrollStep;
+        await new Promise(resolve => setTimeout(resolve, scrollDelay));
+        currentHeight = scrollContainer.scrollHeight;
+      }
+
+      // Scroll back to top to capture any images that might have loaded
+      scrollContainer.scrollTop = 0;
+      await new Promise(resolve => setTimeout(resolve, 1000));
     });
-    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Extract data
-    const images = await extractImages(page);
+    // Extract images with categories from the gallery
+    const imagesData = await page.evaluate(() => {
+      const allImages = [];
+      const seenUrls = new Set();
+      const categoryMap = new Map(); // Map image URLs to categories
+
+      // Define exterior/outdoor categories to exclude
+      const exteriorKeywords = [
+        'balcony', 'balcon', 'balcón', 'exterior', 'outdoor', 'outside',
+        'patio', 'terrace', 'garden', 'yard', 'pool', 'view from',
+        'street', 'building', 'neighbourhood', 'neighborhood',
+        'entrance', 'façade', 'facade', 'roof', 'aerial', 'city view'
+      ];
+
+      // Helper function to check if category is exterior
+      const isExteriorCategory = (text) => {
+        if (!text) return false;
+        const lowerText = text.toLowerCase();
+        return exteriorKeywords.some(keyword => lowerText.includes(keyword));
+      };
+
+      // Find the gallery modal
+      const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+
+      if (modal) {
+        console.log('Gallery modal found, extracting images with categories...');
+
+        // Method 1: Look for image containers with visible captions
+        const slides = modal.querySelectorAll('[role="group"]');
+        slides.forEach((slide, index) => {
+          // Find the main image in this slide
+          const img = slide.querySelector('img[src*="muscache.com"]:not([src*="profile"]):not([src*="user"])');
+          if (!img || !img.src) return;
+
+          // Look for category text - Airbnb shows it on the left side
+          let category = '';
+
+          // Check for h3/h4 headings which often contain the category
+          const heading = slide.querySelector('h3, h4');
+          if (heading) {
+            category = heading.textContent?.trim() || '';
+          }
+
+          // If no heading, check for any text element that might be a category
+          if (!category) {
+            // Look for text in the slide that's not the image
+            const textElements = slide.querySelectorAll('div');
+            for (const elem of textElements) {
+              const text = elem.textContent?.trim();
+              // Check if it's a short label (categories are usually 2-30 chars)
+              if (text && text.length > 1 && text.length < 30 &&
+                  !text.includes('of') && !text.includes('/')) {
+                category = text;
+                break;
+              }
+            }
+          }
+
+          const cleanUrl = img.src.split('?')[0];
+          categoryMap.set(cleanUrl, category);
+        });
+
+        // Method 2: Get all images and match with categories
+        const allModalImages = modal.querySelectorAll('img[src*="muscache.com"]');
+        allModalImages.forEach(img => {
+          const cleanUrl = img.src.split('?')[0];
+
+          // Skip duplicates, profiles, and platform assets
+          if (seenUrls.has(cleanUrl) ||
+              cleanUrl.includes('profile') ||
+              cleanUrl.includes('user') ||
+              cleanUrl.includes('platform-assets')) {
+            return;
+          }
+
+          // Get category from map or try to find it
+          let category = categoryMap.get(cleanUrl) || '';
+
+          // If no category found, check the image's container
+          if (!category) {
+            const container = img.closest('[role="group"], div[class*="slide"]');
+            if (container) {
+              const heading = container.querySelector('h3, h4');
+              if (heading) {
+                category = heading.textContent?.trim() || '';
+              }
+            }
+          }
+
+          // Don't filter here, we'll filter outside page.evaluate for better logging
+
+          seenUrls.add(cleanUrl);
+          allImages.push({
+            url: cleanUrl + '?im_w=1200',
+            alt: img.alt || '',
+            category: category || 'interior',
+            width: img.naturalWidth || img.width || null,
+            height: img.naturalHeight || img.height || null
+          });
+        });
+
+        console.log(`Categories found: ${Array.from(new Set(allImages.map(img => img.category)))}`);
+      }
+
+      // Fallback: get images from the page if modal wasn't found or no images extracted
+      if (allImages.length === 0) {
+        console.log('No modal found or no images in modal, using fallback...');
+        document.querySelectorAll('img[src*="muscache.com"]').forEach(img => {
+          const cleanUrl = img.src.split('?')[0];
+
+          if (!seenUrls.has(cleanUrl) &&
+              !cleanUrl.includes('profile') &&
+              !cleanUrl.includes('user') &&
+              !cleanUrl.includes('platform-assets')) {
+
+            seenUrls.add(cleanUrl);
+            allImages.push({
+              url: cleanUrl + '?im_w=1200',
+              alt: img.alt || '',
+              category: 'interior',
+              width: img.naturalWidth || img.width || null,
+              height: img.naturalHeight || img.height || null
+            });
+          }
+        });
+      }
+
+      return {
+        images: allImages,
+        skipped: []  // For debugging
+      };
+    });
+
+    // Filter images based on keywords
+    const filteredImages = imagesData.images.filter(img => {
+      // Check both category and alt text for exterior keywords
+      const exteriorKeywords = [
+        'balcony', 'balcon', 'balcón', 'exterior', 'outdoor', 'outside',
+        'patio', 'terrace', 'garden', 'yard', 'pool', 'view from',
+        'street', 'building', 'neighbourhood', 'neighborhood',
+        'entrance', 'façade', 'facade', 'roof', 'aerial', 'city view'
+      ];
+
+      const checkText = (img.category + ' ' + img.alt).toLowerCase();
+      const isExterior = exteriorKeywords.some(keyword => checkText.includes(keyword));
+
+      if (isExterior) {
+        console.log(`Filtering out exterior image: ${img.category || img.alt}`);
+      }
+
+      return !isExterior;
+    });
+
+    const images = filteredImages;
     const title = await extractTitle(page);
+
+    // Try to close the photo modal if it's open to get back to main page
+    try {
+      await page.keyboard.press('Escape');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } catch (e) {
+      // Modal might not be open, continue
+    }
 
     await browser.close();
 
@@ -239,7 +389,7 @@ const scrapeAirbnbListing = async (url, useProxyOverride) => {
       data: {
         title,
         totalImages: images.length,
-        gallery: images.slice(0, 50)
+        gallery: images.slice(0, 100) // Increased limit to 100 images
       }
     };
 
