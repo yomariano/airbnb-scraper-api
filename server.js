@@ -6,8 +6,29 @@ const scraper = require('./scraper');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// CORS configuration (allow explicit origins and handle preflight)
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,https://isoview.app,https://www.isoview.app')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser tools (no Origin header)
+    if (!origin) return callback(null, true);
+    const isAllowed = allowedOrigins.includes(origin);
+    return callback(isAllowed ? null : new Error('Not allowed by CORS'), isAllowed);
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+  maxAge: 600
+};
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
+// Ensure preflight requests are handled for all routes
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // Routes
@@ -81,6 +102,9 @@ app.post('/api/scrape', async (req, res) => {
     });
   }
 });
+
+// Explicit preflight handler for scrape endpoint (defensive)
+app.options('/api/scrape', cors(corsOptions));
 
 app.get('/api/health', (req, res) => {
   console.log('\n💚 [API HIT] GET /api/health');
