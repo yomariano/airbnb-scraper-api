@@ -142,7 +142,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Airbnb Scraper API is running`);
   console.log(`📍 Local: http://localhost:${PORT}`);
   console.log(`\nEndpoints:`);
