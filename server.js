@@ -27,8 +27,6 @@ const corsOptions = {
 
 // Middleware
 app.use(cors(corsOptions));
-// Ensure preflight requests are handled for all routes
-app.options('/*', cors(corsOptions));
 app.use(express.json());
 
 // Routes
@@ -102,9 +100,6 @@ app.post('/api/scrape', async (req, res) => {
     });
   }
 });
-
-// Explicit preflight handler for scrape endpoint (defensive)
-app.options('/api/scrape', cors(corsOptions));
 
 app.get('/api/health', (req, res) => {
   console.log('\n💚 [API HIT] GET /api/health');
