@@ -17,7 +17,7 @@ app.post('/api/scrape', async (req, res) => {
   console.log('🕐 Timestamp:', new Date().toISOString());
 
   try {
-    const { url, useProxy } = req.body;
+    const { url, useProxy, maxImages } = req.body;
 
     // Validate input
     if (!url) {
@@ -37,11 +37,27 @@ app.post('/api/scrape', async (req, res) => {
     // Override proxy setting if specified
     const proxyOverride = typeof useProxy === 'boolean' ? useProxy : undefined;
 
+    // Validate maxImages if provided
+    let maxImagesOverride = undefined;
+    if (maxImages !== undefined) {
+      const parsed = parseInt(maxImages);
+      if (isNaN(parsed) || parsed < 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid maxImages value. Must be a positive integer.'
+        });
+      }
+      maxImagesOverride = parsed;
+    }
+
     // Scrape the listing
     console.log('🌐 Starting scrape for URL:', url);
     console.log('🔧 Using proxy:', proxyOverride !== undefined ? proxyOverride : 'default setting');
+    if (maxImagesOverride) {
+      console.log('📸 Max images override:', maxImagesOverride);
+    }
 
-    const result = await scraper.scrapeAirbnbListing(url, proxyOverride);
+    const result = await scraper.scrapeAirbnbListing(url, proxyOverride, maxImagesOverride);
 
     console.log('✅ Scrape completed successfully');
     console.log('📊 Result preview:', {

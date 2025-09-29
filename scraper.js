@@ -49,7 +49,8 @@ const connectBrowser = async () => {
   const useBrightDataBrowser = process.env.USE_BRIGHTDATA_BROWSER === 'true';
   const useProxy = process.env.USE_PROXY === 'true';
   const proxyHost = process.env.PROXY_HOST || 'brd.superproxy.io';
-  const proxyPort = process.env.PROXY_PORT || '9222';
+  // Choose sensible defaults: 9222 for BD Scraping Browser (WebSocket), 22225 for HTTP proxies
+  const proxyPort = process.env.PROXY_PORT || (useBrightDataBrowser ? '9222' : (useProxy ? '22225' : '9222'));
   const proxyUsername = process.env.PROXY_USERNAME;
   const proxyPassword = process.env.PROXY_PASSWORD;
 
@@ -115,17 +116,32 @@ const extractTitle = async (page) => {
 /**
  * Main scraping function
  */
-const scrapeAirbnbListing = async (url, useProxyOverride) => {
+const scrapeAirbnbListing = async (url, useProxyOverride, maxImagesOverride) => {
   // Override proxy setting if specified
   if (typeof useProxyOverride === 'boolean') {
+    // Only override the HTTP proxy flag. Do not toggle BrightData Scraping Browser here.
     process.env.USE_PROXY = useProxyOverride.toString();
-    process.env.USE_BRIGHTDATA_BROWSER = useProxyOverride.toString();
   }
 
   const { browser, useBrightDataBrowser, useProxy, proxyUsername, proxyPassword } = await connectBrowser();
 
   try {
     const page = await browser.newPage();
+
+    // Block accidental navigations to restricted endpoints (e.g., contact_host)
+    try {
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        const requestUrl = request.url();
+        const isTopNav = request.isNavigationRequest();
+        if (isTopNav && /\/contact_host\//.test(requestUrl)) {
+          return request.abort();
+        }
+        return request.continue();
+      });
+    } catch (e) {
+      // Non-fatal: interception may not be supported in some contexts
+    }
 
     // Set user agent
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -149,38 +165,51 @@ const scrapeAirbnbListing = async (url, useProxyOverride) => {
 
     // Try to click "Show all photos" button if it exists
     try {
-      // First, try to find and click the main photo grid or "Show all photos" button
+      // First, try to find and click the explicit photo gallery trigger(s)
       const photoButtonClicked = await page.evaluate(() => {
-        // Strategy 1: Find button with photo count (e.g., "23 photos")
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
-        const photoButton = buttons.find(btn => {
-          const text = btn.textContent || '';
-          // Match patterns like "23 photos", "Show all 23 photos", "23+ photos"
-          return text.match(/\d+\+?\s*(photo|picture|foto)/i) ||
-                 text.toLowerCase().includes('show all') ||
-                 text.toLowerCase().includes('ver todas');
-        });
+        const isPhotoTrigger = (el) => {
+          if (!el) return false;
+          const text = (el.textContent || '').toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const href = (el.getAttribute('href') || '').toLowerCase();
 
-        if (photoButton) {
-          photoButton.click();
-          return 'photo-count-button';
+          // Exclude known non-gallery targets
+          if (href.includes('/contact_host/')) return false;
+
+          // Prefer obvious photo/gallery cues
+          const hasPhotoWords = /photos?|pictures?|fotos?/.test(text) || /photos?/.test(aria);
+          const isPhotosLink = href.includes('/photos');
+          return hasPhotoWords || isPhotosLink;
+        };
+
+        // Strategy 1: explicit buttons with aria-label/text mentioning photos
+        const explicitSelectors = [
+          'button[aria-label*="photo" i]',
+          'button[aria-label*="photos" i]',
+          'button[aria-label*="show all" i]',
+          '[data-testid*="photo" i]',
+          '[data-testid*="photos" i]',
+          '[data-testid="photo-viewer-slideshow-desktop"] button',
+          'a[href*="/photos"]'
+        ];
+
+        for (const sel of explicitSelectors) {
+          const el = document.querySelector(sel);
+          if (el && isPhotoTrigger(el)) {
+            el.click();
+            return `selector:${sel}`;
+          }
         }
 
-        // Strategy 2: Click on the main image grid container if it's clickable
-        const imageGrid = document.querySelector('[data-testid="photo-viewer-slideshow-desktop"] button') ||
-                         document.querySelector('div[role="button"] img')?.closest('div[role="button"]');
-        if (imageGrid) {
-          imageGrid.click();
-          return 'image-grid';
+        // Strategy 2: scan all clickable controls and pick one that clearly mentions photos
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], a[href]'))
+          .filter(isPhotoTrigger);
+        if (candidates.length > 0) {
+          candidates[0].click();
+          return 'candidate:photos-match';
         }
 
-        // Strategy 3: Look for the first large image that might open the gallery
-        const firstImage = document.querySelector('img[src*="muscache.com"]:not([src*="profile"])')?.closest('button, div[role="button"]');
-        if (firstImage) {
-          firstImage.click();
-          return 'first-image';
-        }
-
+        // Avoid generic fallbacks that might click unrelated buttons like "Contact host"
         return null;
       });
 
@@ -383,13 +412,17 @@ const scrapeAirbnbListing = async (url, useProxyOverride) => {
 
     await browser.close();
 
+    // Get max images from override, environment variable, or default to 100
+    const maxImages = maxImagesOverride || parseInt(process.env.MAX_IMAGES) || 100;
+    console.log(`Limiting gallery to ${maxImages} images (found ${images.length} total)`);
+
     return {
       url,
       proxyUsed: useProxy || useBrightDataBrowser,
       data: {
         title,
         totalImages: images.length,
-        gallery: images.slice(0, 100) // Increased limit to 100 images
+        gallery: images.slice(0, maxImages)
       }
     };
 
